@@ -108,4 +108,514 @@
     </style>
 </head>
 
-<body><div id="root"></div></body></html>
+<body class="text-white min-h-screen">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+        // ==================== FIREBASE CONFIGURATION ====================
+        // IMPORTANT: Replace with your own Firebase config from https://console.firebase.google.com
+        // 1. Create a new project at https://console.firebase.google.com
+        // 2. Enable Authentication > Google Sign-in method
+        // 3. Enable Realtime Database > Create database (start in test mode)
+        // 4. Get config from Project Settings > Your apps > Web app
+        // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+        const firebaseConfig = {
+            apiKey: "AIzaSyBlwZ0yYDTX_CnChNeBAqrGguIEzLHdItU",
+            authDomain: "zanzibar-3e2ec.firebaseapp.com",
+            databaseURL: "https://zanzibar-3e2ec-default-rtdb.firebaseio.com",
+            projectId: "zanzibar-3e2ec",
+            storageBucket: "zanzibar-3e2ec.firebasestorage.app",
+            messagingSenderId: "973593888631",
+            appId: "1:973593888631:web:43ee21625511acc3680372",
+            measurementId: "G-3P3ZWNYZVT"
+        };
+
+
+        // Initialize Firebase (only if configured)
+        let firebaseApp = null;
+        let firebaseAuth = null;
+        let firebaseDb = null;
+        const isFirebaseConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY";
+
+        if (isFirebaseConfigured && typeof firebase !== 'undefined') {
+            try {
+                firebaseApp = firebase.initializeApp(firebaseConfig);
+                firebaseAuth = firebase.auth();
+                firebaseDb = firebase.database();
+                // Enable offline persistence
+                firebaseDb.goOnline();
+            } catch (e) {
+                console.error('Firebase init error:', e);
+            }
+        }
+
+        // ==================== CONSTANTS ====================
+        const CURRENCIES = {
+            USD: { symbol: '$', name: 'US Dollar' },
+            TZS: { symbol: 'TSh', name: 'Tanzanian Shilling' },
+            KES: { symbol: 'KSh', name: 'Kenyan Shilling' }
+        };
+
+        const EXPENSE_CATEGORIES = [
+            'Housing', 'Utilities', 'Groceries', 'Dining', 'Transportation',
+            'Healthcare', 'Entertainment', 'Shopping', 'Subscriptions',
+            'Family Support', 'Savings', 'Investments', 'Debt Payment', 'Other'
+        ];
+
+        const INCOME_CATEGORIES = ['Salary', 'Interest', 'Dividends', 'Gifts', 'Refunds', 'Other'];
+
+        const ACCOUNT_TYPES = ['Wallet', 'Bank Account', 'M-Pesa', 'Cash', 'MMF', 'Emergency Fund', 'Big Wallet'];
+
+        const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+
+        // ==================== UTILITY FUNCTIONS ====================
+        const formatCurrency = (amount, currency = 'KES') => {
+            const formatted = new Intl.NumberFormat('en-US', {
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 2
+            }).format(Math.abs(amount || 0));
+            return `${CURRENCIES[currency]?.symbol || ''} ${formatted}`;
+        };
+
+        const generateId = () => Math.random().toString(36).substr(2, 9);
+
+        // ==================== LOCAL STORAGE HELPERS ====================
+        const saveToStorage = (key, data) => {
+            try {
+                localStorage.setItem(key, JSON.stringify(data));
+            } catch (e) {
+                console.error('Storage save error:', e);
+            }
+        };
+
+        const loadFromStorage = (key, defaultValue) => {
+            try {
+                const item = localStorage.getItem(key);
+                return item ? JSON.parse(item) : defaultValue;
+            } catch (e) {
+                console.error('Storage load error:', e);
+                return defaultValue;
+            }
+        };
+
+        // ==================== FIREBASE SYNC HOOK ====================
+        const useFirebaseSync = (userId, onDataUpdate) => {
+            const [syncStatus, setSyncStatus] = useState('disconnected'); // 'synced', 'syncing', 'offline', 'disconnected'
+            const [lastSynced, setLastSynced] = useState(null);
+            const listenersRef = useRef([]);
+            const pendingUpdatesRef = useRef({});
+
+            // Sync data to Firebase
+            const syncToFirebase = useCallback((dataType, data) => {
+                if (!firebaseDb || !userId) return;
+
+                setSyncStatus('syncing');
+                const ref = firebaseDb.ref(`users/${userId}/${dataType}`);
+
+                ref.set(data)
+                    .then(() => {
+                        setSyncStatus('synced');
+                        setLastSynced(new Date());
+                    })
+                    .catch((error) => {
+                        console.error(`Sync error for ${dataType}:`, error);
+                        setSyncStatus('offline');
+                        // Queue for retry
+                        pendingUpdatesRef.current[dataType] = data;
+                    });
+            }, [userId]);
+
+            // Setup real-time listeners
+            useEffect(() => {
+                if (!firebaseDb || !userId) {
+                    setSyncStatus('disconnected');
+                    return;
+                }
+
+                setSyncStatus('syncing');
+                const dataTypes = ['transactions', 'accounts', 'goals', 'subscriptions', 'exchangeRates', 'settings'];
+
+                // Clear existing listeners
+                listenersRef.current.forEach(unsub => unsub());
+                listenersRef.current = [];
+
+                dataTypes.forEach(dataType => {
+                    const ref = firebaseDb.ref(`users/${userId}/${dataType}`);
+
+                    const listener = ref.on('value', (snapshot) => {
+                        const cloudData = snapshot.val();
+
+                        if (cloudData !== null) {
+                            // Data exists in cloud - use it
+                            onDataUpdate(dataType, cloudData);
+                            setSyncStatus('synced');
+                            setLastSynced(new Date());
+                        }
+                        // If no cloud data, we'll push when user makes changes
+                    }, (error) => {
+                        console.error(`Listen error for ${dataType}:`, error);
+                        setSyncStatus('offline');
+                    });
+
+                    listenersRef.current.push(() => ref.off('value', listener));
+                });
+
+                // Monitor connection state
+                const connectedRef = firebaseDb.ref('.info/connected');
+                const connListener = connectedRef.on('value', (snap) => {
+                    if (snap.val() === true) {
+                        setSyncStatus('synced');
+                        // Reconnected - push any pending updates
+                        Object.entries(pendingUpdatesRef.current).forEach(([type, data]) => {
+                            syncToFirebase(type, data);
+                        });
+                        pendingUpdatesRef.current = {};
+                    } else {
+                        if (userId) setSyncStatus('offline');
+                    }
+                });
+                listenersRef.current.push(() => connectedRef.off('value', connListener));
+
+                return () => {
+                    listenersRef.current.forEach(unsub => unsub());
+                    listenersRef.current = [];
+                };
+            }, [userId, onDataUpdate, syncToFirebase]);
+
+            return { syncStatus, lastSynced, syncToFirebase };
+        };
+
+        // ==================== AUTH HOOK ====================
+        const useFirebaseAuth = () => {
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+
+            useEffect(() => {
+                if (!firebaseAuth) {
+                    setLoading(false);
+                    return;
+                }
+
+                const unsubscribe = firebaseAuth.onAuthStateChanged((user) => {
+                    setUser(user);
+                    setLoading(false);
+                }, (error) => {
+                    setError(error.message);
+                    setLoading(false);
+                });
+
+                return () => unsubscribe();
+            }, []);
+
+            const signInWithGoogle = async () => {
+                if (!firebaseAuth) {
+                    setError('Firebase not configured');
+                    return;
+                }
+
+                setLoading(true);
+                setError(null);
+
+                try {
+                    const provider = new firebase.auth.GoogleAuthProvider();
+                    await firebaseAuth.signInWithPopup(provider);
+                } catch (e) {
+                    setError(e.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const signOut = async () => {
+                if (!firebaseAuth) return;
+
+                try {
+                    await firebaseAuth.signOut();
+                } catch (e) {
+                    setError(e.message);
+                }
+            };
+
+            return { user, loading, error, signInWithGoogle, signOut };
+        };
+
+        // ==================== CHART COMPONENT ====================
+        const BarChartComponent = ({ data, labels, title }) => {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                if (!canvasRef.current) return;
+
+                if (chartRef.current) {
+                    chartRef.current.destroy();
+                }
+
+                const ctx = canvasRef.current.getContext('2d');
+                chartRef.current = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            {
+                                label: 'Income',
+                                data: data.map(d => d.income),
+                                backgroundColor: '#10b981',
+                                borderRadius: 4
+                            },
+                            {
+                                label: 'Expenses',
+                                data: data.map(d => d.expenses),
+                                backgroundColor: '#ef4444',
+                                borderRadius: 4
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                labels: { color: '#94a3b8' }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                ticks: { color: '#94a3b8' },
+                                grid: { color: '#334155' }
+                            },
+                            y: {
+                                ticks: {
+                                    color: '#94a3b8',
+                                    callback: (value) => (value / 1000).toFixed(0) + 'K'
+                                },
+                                grid: { color: '#334155' }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartRef.current) {
+                        chartRef.current.destroy();
+                    }
+                };
+            }, [data, labels]);
+
+            return <canvas ref={canvasRef} />;
+        };
+
+        const PieChartComponent = ({ data }) => {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                if (!canvasRef.current || !data.length) return;
+
+                if (chartRef.current) {
+                    chartRef.current.destroy();
+                }
+
+                const ctx = canvasRef.current.getContext('2d');
+                chartRef.current = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: data.map(d => d.name),
+                        datasets: [{
+                            data: data.map(d => d.value),
+                            backgroundColor: COLORS,
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: {
+                                    color: '#94a3b8',
+                                    boxWidth: 12,
+                                    padding: 10
+                                }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartRef.current) {
+                        chartRef.current.destroy();
+                    }
+                };
+            }, [data]);
+
+            return <canvas ref={canvasRef} />;
+        };
+
+        const LineChartComponent = ({ data, labels }) => {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                if (!canvasRef.current) return;
+
+                if (chartRef.current) {
+                    chartRef.current.destroy();
+                }
+
+                const ctx = canvasRef.current.getContext('2d');
+                chartRef.current = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Savings',
+                            data: data,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                labels: { color: '#94a3b8' }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                ticks: { color: '#94a3b8' },
+                                grid: { color: '#334155' }
+                            },
+                            y: {
+                                ticks: {
+                                    color: '#94a3b8',
+                                    callback: (value) => (value / 1000).toFixed(0) + 'K'
+                                },
+                                grid: { color: '#334155' }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartRef.current) {
+                        chartRef.current.destroy();
+                    }
+                };
+            }, [data, labels]);
+
+            return <canvas ref={canvasRef} />;
+        };
+
+        // ==================== INITIAL STATE ====================
+        const getInitialState = () => ({
+            transactions: loadFromStorage('transactions', []),
+            accounts: loadFromStorage('accounts', [
+                { id: '1', name: 'Bank Account', type: 'Bank Account', balance: 0, currency: 'TZS' },
+                { id: '2', name: 'M-Pesa', type: 'M-Pesa', balance: 0, currency: 'TZS' },
+                { id: '3', name: 'Wallet', type: 'Wallet', balance: 0, currency: 'TZS' },
+                { id: '4', name: 'MMF Kenya', type: 'MMF', balance: 0, currency: 'KES' }
+            ]),
+            goals: loadFromStorage('goals', []),
+            subscriptions: loadFromStorage('subscriptions', []),
+            exchangeRates: loadFromStorage('exchangeRates', {
+                USD_TZS: 2700,
+                USD_KES: 129,
+                TZS_KES: 0.047,
+                lastUpdated: null
+            }),
+            settings: loadFromStorage('settings', {
+                baseCurrency: 'KES',
+                theme: 'dark',
+                autoFetchRates: true
+            })
+        });
+
+        // ==================== SYNC STATUS INDICATOR ====================
+        const SyncStatusIndicator = ({ status, lastSynced, user, onSignIn, onSignOut, authLoading }) => {
+            const getStatusInfo = () => {
+                switch (status) {
+                    case 'synced':
+                        return { color: 'bg-green-500', text: 'Synced', icon: '✓' };
+                    case 'syncing':
+                        return { color: 'bg-blue-500', text: 'Syncing...', icon: '↻', spin: true };
+                    case 'offline':
+                        return { color: 'bg-yellow-500', text: 'Offline', icon: '!' };
+                    case 'disconnected':
+                    default:
+                        return { color: 'bg-slate-500', text: 'Not syncing', icon: '○' };
+                }
+            };
+
+            const info = getStatusInfo();
+
+            if (!isFirebaseConfigured) {
+                return (
+                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                        <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+                        <span>Local only</span>
+                    </div>
+                );
+            }
+
+            if (!user) {
+                return (
+                    <button
+                        onClick={onSignIn}
+                        disabled={authLoading}
+                        className="flex items-center gap-2 bg-white text-slate-900 px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-slate-100 transition disabled:opacity-50"
+                    >
+                        {authLoading ? (
+                            <span className="sync-spin">↻</span>
+                        ) : (
+                            <svg className="w-4 h-4" viewBox="0 0 24 24">
+                                <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                                <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                                <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                                <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                            </svg>
+                        )}
+                        Sign in to sync
+                    </button>
+                );
+            }
+
+            return (
+                <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 text-xs">
+                        <span className={`w-2 h-2 rounded-full ${info.color} ${status === 'syncing' ? 'sync-pulse' : ''}`}></span>
+                        <span className={info.spin ? 'sync-spin' : ''}>{info.icon}</span>
+                        <span className="text-slate-400">{info.text}</span>
+                        {lastSynced && status === 'synced' && (
+                            <span className="text-slate-500">
+                                {lastSynced.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <img
+                            src={user.photoURL || 'https://via.placeholder.com/24'}
+                            alt=""
+                            className="w-6 h-6 rounded-full"
+                        />
+                        <button
+                            onClick={onSignOut}
+                            className="text-xs text-slate-400 hover:text-white transition"
+                        >
+                            Sign out
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // ==================== MAIN APP COMPONENT ====================
+        const root = ReactDOM.createRoot(document.getElementById("root")); root.render(<App />); </script></body></html>
