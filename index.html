@@ -55,8 +55,8 @@
 
         .gradient-text {
             background: linear-gradient(135deg, #60a5fa 0%, #c084fc 100%);
-            -webkit-background-clip: text;
-            background-clip: text;
+            -webkit-
+            
             -webkit-text-fill-color: transparent;
         }
 
@@ -618,4 +618,1045 @@
         };
 
         // ==================== MAIN APP COMPONENT ====================
-        const root = ReactDOM.createRoot(document.getElementById("root")); root.render(<App />); </script></body></html>
+        const App = () => {
+            const [state, setState] = useState(getInitialState);
+            const [activeTab, setActiveTab] = useState('dashboard');
+            const [showAddModal, setShowAddModal] = useState(null);
+            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
+            const [notification, setNotification] = useState(null);
+
+            // Firebase Auth
+            const { user, loading: authLoading, error: authError, signInWithGoogle, signOut } = useFirebaseAuth();
+
+            // Handle data updates from Firebase
+            const handleDataUpdate = useCallback((dataType, data) => {
+                setState(prev => ({
+                    ...prev,
+                    [dataType]: data
+                }));
+                // Also save to localStorage as backup
+                saveToStorage(dataType, data);
+            }, []);
+
+            // Firebase Sync
+            const { syncStatus, lastSynced, syncToFirebase } = useFirebaseSync(
+                user?.uid,
+                handleDataUpdate
+            );
+
+            // Persist state changes - sync to Firebase if logged in, otherwise just localStorage
+            useEffect(() => {
+                saveToStorage('transactions', state.transactions);
+                saveToStorage('accounts', state.accounts);
+                saveToStorage('goals', state.goals);
+                saveToStorage('subscriptions', state.subscriptions);
+                saveToStorage('exchangeRates', state.exchangeRates);
+                saveToStorage('settings', state.settings);
+            }, [state]);
+
+            // Sync to Firebase when state changes
+            const prevStateRef = useRef(null);
+            useEffect(() => {
+                if (!user || !syncToFirebase) return;
+
+                // Skip initial render
+                if (prevStateRef.current === null) {
+                    prevStateRef.current = JSON.stringify(state);
+                    return;
+                }
+
+                const currentStateStr = JSON.stringify(state);
+                if (prevStateRef.current === currentStateStr) return;
+
+                // Sync changed data types
+                const dataTypes = ['transactions', 'accounts', 'goals', 'subscriptions', 'exchangeRates', 'settings'];
+                const prevState = JSON.parse(prevStateRef.current);
+
+                dataTypes.forEach(type => {
+                    if (JSON.stringify(prevState[type]) !== JSON.stringify(state[type])) {
+                        syncToFirebase(type, state[type]);
+                    }
+                });
+
+                prevStateRef.current = currentStateStr;
+            }, [state, user, syncToFirebase]);
+
+            const showNotification = (message, type = 'info') => {
+                setNotification({ message, type });
+                setTimeout(() => setNotification(null), 3000);
+            };
+
+            const convertCurrency = (amount, from, to) => {
+                if (from === to) return amount;
+                const rates = state.exchangeRates;
+
+                let usdAmount = amount;
+                if (from === 'TZS') usdAmount = amount / rates.USD_TZS;
+                else if (from === 'KES') usdAmount = amount / rates.USD_KES;
+
+                if (to === 'USD') return usdAmount;
+                if (to === 'TZS') return usdAmount * rates.USD_TZS;
+                if (to === 'KES') return usdAmount * rates.USD_KES;
+
+                return amount;
+            };
+
+            const addTransaction = (transaction) => {
+                const newTransaction = {
+                    ...transaction,
+                    id: generateId(),
+                    createdAt: new Date().toISOString()
+                };
+                setState(prev => ({
+                    ...prev,
+                    transactions: [...prev.transactions, newTransaction]
+                }));
+                showNotification('Transaction added!', 'success');
+                setShowAddModal(null);
+            };
+
+            const addGoal = (goal) => {
+                const newGoal = {
+                    ...goal,
+                    id: generateId(),
+                    saved: 0,
+                    createdAt: new Date().toISOString()
+                };
+                setState(prev => ({
+                    ...prev,
+                    goals: [...prev.goals, newGoal]
+                }));
+                showNotification('Goal created!', 'success');
+                setShowAddModal(null);
+            };
+
+            const updateGoalProgress = (goalId, amount) => {
+                setState(prev => ({
+                    ...prev,
+                    goals: prev.goals.map(g =>
+                        g.id === goalId ? { ...g, saved: g.saved + amount } : g
+                    )
+                }));
+            };
+
+            const addSubscription = (subscription) => {
+                const newSub = {
+                    ...subscription,
+                    id: generateId()
+                };
+                setState(prev => ({
+                    ...prev,
+                    subscriptions: [...prev.subscriptions, newSub]
+                }));
+                showNotification('Subscription added!', 'success');
+                setShowAddModal(null);
+            };
+
+            const addAccount = (account) => {
+                const newAccount = {
+                    ...account,
+                    id: generateId()
+                };
+                setState(prev => ({
+                    ...prev,
+                    accounts: [...prev.accounts, newAccount]
+                }));
+                showNotification('Account added!', 'success');
+                setShowAddModal(null);
+            };
+
+            const deleteItem = (type, id) => {
+                setState(prev => ({
+                    ...prev,
+                    [type]: prev[type].filter(item => item.id !== id)
+                }));
+                showNotification('Deleted successfully!', 'info');
+            };
+
+            const exportToExcel = (type = 'monthly') => {
+                const wb = XLSX.utils.book_new();
+                const baseCurrency = state.settings.baseCurrency;
+
+                if (type === 'monthly') {
+                    const monthTransactions = state.transactions.filter(t =>
+                        t.date?.startsWith(selectedMonth)
+                    );
+
+                    const ws = XLSX.utils.json_to_sheet(monthTransactions.map(t => ({
+                        Date: t.date,
+                        Description: t.description,
+                        Category: t.category,
+                        Type: t.type,
+                        Amount: t.amount,
+                        Currency: t.currency,
+                        'Amount (KES)': convertCurrency(t.amount, t.currency, 'KES').toFixed(2)
+                    })));
+                    XLSX.utils.book_append_sheet(wb, ws, `Transactions ${selectedMonth}`);
+
+                } else {
+                    const yearTransactions = state.transactions.filter(t =>
+                        t.date?.startsWith(selectedMonth.slice(0, 4))
+                    );
+
+                    const ws = XLSX.utils.json_to_sheet(yearTransactions.map(t => ({
+                        Date: t.date,
+                        Description: t.description,
+                        Category: t.category,
+                        Type: t.type,
+                        Amount: t.amount,
+                        Currency: t.currency,
+                        'Amount (KES)': convertCurrency(t.amount, t.currency, 'KES').toFixed(2)
+                    })));
+                    XLSX.utils.book_append_sheet(wb, ws, 'All Transactions');
+
+                    const goalsWs = XLSX.utils.json_to_sheet(state.goals.map(g => ({
+                        Name: g.name,
+                        Target: g.target,
+                        Saved: g.saved,
+                        Currency: g.currency,
+                        Progress: `${((g.saved / g.target) * 100).toFixed(1)}%`
+                    })));
+                    XLSX.utils.book_append_sheet(wb, goalsWs, 'Goals');
+
+                    const accountsWs = XLSX.utils.json_to_sheet(state.accounts.map(a => ({
+                        Name: a.name,
+                        Type: a.type,
+                        Balance: a.balance,
+                        Currency: a.currency
+                    })));
+                    XLSX.utils.book_append_sheet(wb, accountsWs, 'Accounts');
+                }
+
+                const filename = type === 'monthly'
+                    ? `Budget_Report_${selectedMonth}.xlsx`
+                    : `Annual_Report_${selectedMonth.slice(0, 4)}.xlsx`;
+
+                XLSX.writeFile(wb, filename);
+                showNotification('Report exported!', 'success');
+            };
+
+            const importData = (file) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        setState({
+                            transactions: data.transactions || [],
+                            accounts: data.accounts || [],
+                            goals: data.goals || [],
+                            subscriptions: data.subscriptions || [],
+                            exchangeRates: data.exchangeRates || state.exchangeRates,
+                            settings: data.settings || state.settings
+                        });
+                        showNotification('Data restored successfully!', 'success');
+                    } catch (err) {
+                        showNotification('Invalid backup file', 'error');
+                    }
+                };
+                reader.readAsText(file);
+            };
+
+            const exportData = () => {
+                const data = JSON.stringify(state, null, 2);
+                const blob = new Blob([data], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `budget_backup_${new Date().toISOString().slice(0, 10)}.json`;
+                a.click();
+                showNotification('Backup exported!', 'success');
+            };
+
+            // Calculate totals
+            const totals = useMemo(() => {
+                const baseCurrency = state.settings.baseCurrency;
+
+                const totalAccounts = state.accounts.reduce((sum, acc) =>
+                    sum + convertCurrency(acc.balance, acc.currency, baseCurrency), 0);
+
+                const monthTransactions = state.transactions.filter(t =>
+                    t.date?.startsWith(selectedMonth)
+                );
+
+                const monthlyIncome = monthTransactions
+                    .filter(t => t.type === 'income')
+                    .reduce((sum, t) => sum + convertCurrency(t.amount, t.currency, baseCurrency), 0);
+
+                const monthlyExpenses = monthTransactions
+                    .filter(t => t.type === 'expense')
+                    .reduce((sum, t) => sum + convertCurrency(t.amount, t.currency, baseCurrency), 0);
+
+                const totalGoals = state.goals.reduce((sum, g) =>
+                    sum + convertCurrency(g.target, g.currency, baseCurrency), 0);
+
+                const totalSaved = state.goals.reduce((sum, g) =>
+                    sum + convertCurrency(g.saved, g.currency, baseCurrency), 0);
+
+                return {
+                    totalAccounts,
+                    monthlyIncome,
+                    monthlyExpenses,
+                    netSavings: monthlyIncome - monthlyExpenses,
+                    totalGoals,
+                    totalSaved,
+                    goalsProgress: totalGoals > 0 ? (totalSaved / totalGoals) * 100 : 0
+                };
+            }, [state, selectedMonth]);
+
+            // Chart data
+            const chartData = useMemo(() => {
+                const baseCurrency = state.settings.baseCurrency;
+                const months = {};
+
+                state.transactions.forEach(t => {
+                    const month = t.date?.slice(0, 7);
+                    if (!month) return;
+                    if (!months[month]) months[month] = { income: 0, expenses: 0 };
+                    const amount = convertCurrency(t.amount, t.currency, baseCurrency);
+                    if (t.type === 'income') months[month].income += amount;
+                    else months[month].expenses += amount;
+                });
+
+                const sorted = Object.entries(months)
+                    .sort((a, b) => a[0].localeCompare(b[0]))
+                    .slice(-6);
+
+                return {
+                    labels: sorted.map(([m]) => m),
+                    data: sorted.map(([, d]) => d)
+                };
+            }, [state.transactions, state.settings.baseCurrency]);
+
+            const categoryData = useMemo(() => {
+                const baseCurrency = state.settings.baseCurrency;
+                const cats = {};
+
+                state.transactions
+                    .filter(t => t.date?.startsWith(selectedMonth) && t.type === 'expense')
+                    .forEach(t => {
+                        if (!cats[t.category]) cats[t.category] = 0;
+                        cats[t.category] += convertCurrency(t.amount, t.currency, baseCurrency);
+                    });
+
+                return Object.entries(cats)
+                    .map(([name, value]) => ({ name, value }))
+                    .sort((a, b) => b.value - a.value)
+                    .slice(0, 8);
+            }, [state.transactions, selectedMonth, state.settings.baseCurrency]);
+
+            return (
+                <div className="min-h-screen bg-transparent">
+                    {/* Notification */}
+                    {notification && (
+                        <div className={`fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg ${notification.type === 'success' ? 'bg-green-600' :
+                            notification.type === 'error' ? 'bg-red-600' : 'bg-blue-600'
+                            }`}>
+                            {notification.message}
+                        </div>
+                    )}
+
+                    {/* Header */}
+                    <header className="gradient-bg border-b border-white/10 sticky top-0 z-40">
+                        <div className="max-w-7xl mx-auto px-4 py-4">
+                            <div className="flex items-center justify-between flex-wrap gap-4">
+                                <div className="flex items-center gap-4">
+                                    <div className="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center text-xl">
+                                        💰
+                                    </div>
+                                    <div>
+                                        <h1 className="text-xl font-bold">Nexus Wealth Tracker</h1>
+                                        <p className="text-sm text-slate-400">Personal Finance Manager</p>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-4">
+                                    <input
+                                        type="month"
+                                        value={selectedMonth}
+                                        onChange={(e) => setSelectedMonth(e.target.value)}
+                                        className="bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-sm"
+                                    />
+                                    <SyncStatusIndicator
+                                        status={syncStatus}
+                                        lastSynced={lastSynced}
+                                        user={user}
+                                        onSignIn={signInWithGoogle}
+                                        onSignOut={signOut}
+                                        authLoading={authLoading}
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Navigation */}
+                            <nav className="flex gap-1 mt-4 overflow-x-auto pb-2">
+                                {['dashboard', 'transactions', 'accounts', 'goals', 'subscriptions', 'reports', 'settings'].map(tab => (
+                                    <button
+                                        key={tab}
+                                        onClick={() => setActiveTab(tab)}
+                                        className={`px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap ${activeTab === tab
+                                            ? 'bg-blue-600 text-white'
+                                            : 'text-slate-400 hover:bg-white/10 hover:text-white'
+                                            }`}
+                                    >
+                                        {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                                    </button>
+                                ))}
+                            </nav>
+                        </div>
+                    </header>
+
+                    {/* Main Content */}
+                    <main className="max-w-7xl mx-auto px-4 py-6">
+                        {activeTab === 'dashboard' && (
+                            <div className="space-y-6">
+                                {/* Summary Cards */}
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                                    <div className="bg-gradient-to-br from-blue-600 to-blue-800 rounded-xl p-6">
+                                        <p className="text-sm opacity-80">Total Net Worth</p>
+                                        <p className="text-2xl font-bold mt-1">{formatCurrency(totals.totalAccounts, state.settings.baseCurrency)}</p>
+                                    </div>
+                                    <div className="bg-gradient-to-br from-green-600 to-green-800 rounded-xl p-6">
+                                        <p className="text-sm opacity-80">Monthly Income</p>
+                                        <p className="text-2xl font-bold mt-1">{formatCurrency(totals.monthlyIncome, state.settings.baseCurrency)}</p>
+                                    </div>
+                                    <div className="bg-gradient-to-br from-red-600 to-red-800 rounded-xl p-6">
+                                        <p className="text-sm opacity-80">Monthly Expenses</p>
+                                        <p className="text-2xl font-bold mt-1">{formatCurrency(totals.monthlyExpenses, state.settings.baseCurrency)}</p>
+                                    </div>
+                                    <div className={`bg-gradient-to-br ${totals.netSavings >= 0 ? 'from-emerald-600 to-emerald-800' : 'from-orange-600 to-orange-800'} rounded-xl p-6`}>
+                                        <p className="text-sm opacity-80">Net Savings</p>
+                                        <p className="text-2xl font-bold mt-1">{formatCurrency(totals.netSavings, state.settings.baseCurrency)}</p>
+                                    </div>
+                                </div>
+
+                                {/* Charts */}
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                    <div className="glass-card rounded-xl p-6">
+                                        <h3 className="text-lg font-semibold mb-4">Income vs Expenses (Last 6 Months)</h3>
+                                        <div style={{ height: '300px' }}>
+                                            {chartData.data.length > 0 ? (
+                                                <BarChartComponent data={chartData.data} labels={chartData.labels} />
+                                            ) : (
+                                                <p className="text-slate-400 text-center pt-20">No data yet. Add transactions to see chart.</p>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div className="glass-card rounded-xl p-6">
+                                        <h3 className="text-lg font-semibold mb-4">Expenses by Category</h3>
+                                        <div style={{ height: '300px' }}>
+                                            {categoryData.length > 0 ? (
+                                                <PieChartComponent data={categoryData} />
+                                            ) : (
+                                                <p className="text-slate-400 text-center pt-20">No expenses this month.</p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Goals Progress */}
+                                <div className="glass-card rounded-xl p-6">
+                                    <h3 className="text-lg font-semibold mb-4">Savings Goals</h3>
+                                    <div className="space-y-4">
+                                        {state.goals.slice(0, 5).map(goal => {
+                                            const progress = Math.min((goal.saved / goal.target) * 100, 100);
+                                            return (
+                                                <div key={goal.id} className="space-y-2">
+                                                    <div className="flex justify-between text-sm">
+                                                        <span>{goal.name}</span>
+                                                        <span>{formatCurrency(goal.saved, goal.currency)} / {formatCurrency(goal.target, goal.currency)}</span>
+                                                    </div>
+                                                    <div className="h-3 bg-white/10 rounded-full overflow-hidden">
+                                                        <div
+                                                            className="h-full bg-gradient-to-r from-blue-500 to-green-500 progress-bar"
+                                                            style={{ width: `${progress}%` }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                        {state.goals.length === 0 && (
+                                            <p className="text-slate-400 text-center py-4">No goals yet. Create your first savings goal!</p>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Accounts Overview */}
+                                <div className="glass-card rounded-xl p-6">
+                                    <h3 className="text-lg font-semibold mb-4">Accounts Overview</h3>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                        {state.accounts.map(account => (
+                                            <div key={account.id} className="bg-white/10 rounded-lg p-4">
+                                                <p className="text-sm text-slate-400">{account.name}</p>
+                                                <p className="text-xl font-bold mt-1">{formatCurrency(account.balance, account.currency)}</p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'transactions' && (
+                            <div className="space-y-6">
+                                <div className="flex justify-between items-center">
+                                    <h2 className="text-xl font-bold">Transactions</h2>
+                                    <button
+                                        onClick={() => setShowAddModal('transaction')}
+                                        className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm"
+                                    >
+                                        + Add Transaction
+                                    </button>
+                                </div>
+
+                                <div className="glass-card rounded-xl overflow-hidden">
+                                    <table className="w-full">
+                                        <thead className="bg-white/10">
+                                            <tr className="text-left text-slate-400 text-sm">
+                                                <th className="p-4">Date</th>
+                                                <th className="p-4">Description</th>
+                                                <th className="p-4">Category</th>
+                                                <th className="p-4">Amount</th>
+                                                <th className="p-4">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {state.transactions
+                                                .filter(t => t.date?.startsWith(selectedMonth))
+                                                .sort((a, b) => new Date(b.date) - new Date(a.date))
+                                                .slice(0, 50)
+                                                .map(t => (
+                                                    <tr key={t.id} className="border-t border-white/10">
+                                                        <td className="p-4 text-sm">{t.date}</td>
+                                                        <td className="p-4">{t.description}</td>
+                                                        <td className="p-4 text-sm text-slate-400">{t.category}</td>
+                                                        <td className={`p-4 font-medium ${t.type === 'income' ? 'text-green-400' : 'text-red-400'}`}>
+                                                            {t.type === 'income' ? '+' : '-'}{formatCurrency(t.amount, t.currency)}
+                                                        </td>
+                                                        <td className="p-4">
+                                                            <button onClick={() => deleteItem('transactions', t.id)} className="text-red-400 hover:text-red-300">
+                                                                Delete
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                        </tbody>
+                                    </table>
+                                    {state.transactions.filter(t => t.date?.startsWith(selectedMonth)).length === 0 && (
+                                        <p className="text-slate-400 text-center py-8">No transactions this month.</p>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'accounts' && (
+                            <div className="space-y-6">
+                                <div className="flex justify-between items-center">
+                                    <h2 className="text-xl font-bold">Accounts</h2>
+                                    <button
+                                        onClick={() => setShowAddModal('account')}
+                                        className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm"
+                                    >
+                                        + Add Account
+                                    </button>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                    {state.accounts.map(account => (
+                                        <div key={account.id} className="glass-card rounded-xl p-6">
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <h3 className="font-semibold text-lg">{account.name}</h3>
+                                                    <p className="text-sm text-slate-400">{account.type}</p>
+                                                </div>
+                                                <button onClick={() => deleteItem('accounts', account.id)} className="text-red-400">Delete</button>
+                                            </div>
+                                            <p className="text-3xl font-bold mt-4">{formatCurrency(account.balance, account.currency)}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'goals' && (
+                            <div className="space-y-6">
+                                <div className="flex justify-between items-center">
+                                    <h2 className="text-xl font-bold">Savings Goals</h2>
+                                    <button
+                                        onClick={() => setShowAddModal('goal')}
+                                        className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm"
+                                    >
+                                        + Add Goal
+                                    </button>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    {state.goals.map(goal => {
+                                        const progress = Math.min((goal.saved / goal.target) * 100, 100);
+                                        return (
+                                            <div key={goal.id} className="glass-card rounded-xl p-6">
+                                                <div className="flex justify-between items-start mb-4">
+                                                    <h3 className="font-semibold text-lg">{goal.name}</h3>
+                                                    <button onClick={() => deleteItem('goals', goal.id)} className="text-red-400">Delete</button>
+                                                </div>
+
+                                                <div className="mb-4">
+                                                    <div className="flex justify-between text-sm mb-2">
+                                                        <span>{formatCurrency(goal.saved, goal.currency)}</span>
+                                                        <span>{formatCurrency(goal.target, goal.currency)}</span>
+                                                    </div>
+                                                    <div className="h-4 bg-white/10 rounded-full overflow-hidden">
+                                                        <div
+                                                            className={`h-full ${progress >= 100 ? 'bg-green-500' : 'bg-gradient-to-r from-blue-500 to-purple-500'}`}
+                                                            style={{ width: `${progress}%` }}
+                                                        />
+                                                    </div>
+                                                    <p className="text-sm text-slate-400 mt-2">{progress.toFixed(1)}% complete</p>
+                                                </div>
+
+                                                <div className="flex gap-2">
+                                                    <input
+                                                        type="number"
+                                                        placeholder="Add amount"
+                                                        id={`goal-${goal.id}`}
+                                                        className="flex-1 bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-sm"
+                                                    />
+                                                    <button
+                                                        onClick={() => {
+                                                            const input = document.getElementById(`goal-${goal.id}`);
+                                                            if (input.value) {
+                                                                updateGoalProgress(goal.id, parseFloat(input.value));
+                                                                input.value = '';
+                                                                showNotification('Progress updated!', 'success');
+                                                            }
+                                                        }}
+                                                        className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg text-sm"
+                                                    >
+                                                        Add
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {state.goals.length === 0 && (
+                                    <div className="glass-card rounded-xl p-12 text-center">
+                                        <p className="text-4xl mb-4">🎯</p>
+                                        <p className="text-slate-400">No savings goals yet. Create your first goal!</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {activeTab === 'subscriptions' && (
+                            <div className="space-y-6">
+                                <div className="flex justify-between items-center">
+                                    <h2 className="text-xl font-bold">Subscriptions</h2>
+                                    <button
+                                        onClick={() => setShowAddModal('subscription')}
+                                        className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm"
+                                    >
+                                        + Add Subscription
+                                    </button>
+                                </div>
+
+                                <div className="glass-card rounded-xl overflow-hidden">
+                                    <table className="w-full">
+                                        <thead className="bg-white/10">
+                                            <tr className="text-left text-slate-400 text-sm">
+                                                <th className="p-4">Service</th>
+                                                <th className="p-4">Amount</th>
+                                                <th className="p-4">Frequency</th>
+                                                <th className="p-4">Next Due</th>
+                                                <th className="p-4">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {state.subscriptions.map(sub => (
+                                                <tr key={sub.id} className="border-t border-white/10">
+                                                    <td className="p-4 font-medium">{sub.name}</td>
+                                                    <td className="p-4">{formatCurrency(sub.amount, sub.currency)}</td>
+                                                    <td className="p-4 capitalize">{sub.frequency}</td>
+                                                    <td className="p-4">{sub.nextDue}</td>
+                                                    <td className="p-4">
+                                                        <button onClick={() => deleteItem('subscriptions', sub.id)} className="text-red-400">Delete</button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                    {state.subscriptions.length === 0 && (
+                                        <p className="text-slate-400 text-center py-8">No subscriptions tracked yet.</p>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'reports' && (
+                            <div className="space-y-6">
+                                <div className="flex justify-between items-center">
+                                    <h2 className="text-xl font-bold">Reports</h2>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => exportToExcel('monthly')} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg text-sm">
+                                            Export Monthly
+                                        </button>
+                                        <button onClick={() => exportToExcel('yearly')} className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm">
+                                            Export Annual
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Savings Trend */}
+                                <div className="glass-card rounded-xl p-6">
+                                    <h3 className="text-lg font-semibold mb-4">Savings Trend</h3>
+                                    <div style={{ height: '300px' }}>
+                                        <LineChartComponent
+                                            data={chartData.data.map(d => d.income - d.expenses)}
+                                            labels={chartData.labels}
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Monthly Summary Table */}
+                                <div className="glass-card rounded-xl overflow-hidden">
+                                    <h3 className="text-lg font-semibold p-6 pb-0">Monthly Summary</h3>
+                                    <table className="w-full mt-4">
+                                        <thead className="bg-white/10">
+                                            <tr className="text-left text-slate-400 text-sm">
+                                                <th className="p-4">Month</th>
+                                                <th className="p-4 text-right">Income</th>
+                                                <th className="p-4 text-right">Expenses</th>
+                                                <th className="p-4 text-right">Savings</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {chartData.labels.map((month, i) => (
+                                                <tr key={month} className="border-t border-white/10">
+                                                    <td className="p-4">{month}</td>
+                                                    <td className="p-4 text-right text-green-400">{formatCurrency(chartData.data[i].income, state.settings.baseCurrency)}</td>
+                                                    <td className="p-4 text-right text-red-400">{formatCurrency(chartData.data[i].expenses, state.settings.baseCurrency)}</td>
+                                                    <td className="p-4 text-right text-blue-400">{formatCurrency(chartData.data[i].income - chartData.data[i].expenses, state.settings.baseCurrency)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'settings' && (
+                            <div className="space-y-6 max-w-2xl">
+                                <h2 className="text-xl font-bold">Settings</h2>
+
+                                {/* Cloud Sync Settings */}
+                                <div className="glass-card rounded-xl p-6">
+                                    <h3 className="font-semibold mb-4">Cloud Sync</h3>
+                                    <div className="space-y-4">
+                                        {!isFirebaseConfigured ? (
+                                            <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-4">
+                                                <p className="text-yellow-400 font-medium mb-2">Sync not configured</p>
+                                                <p className="text-sm text-slate-300 mb-3">
+                                                    To enable cross-device sync, set up Firebase:
+                                                </p>
+                                                <ol className="text-sm text-slate-400 list-decimal list-inside space-y-1">
+                                                    <li>Go to <a href="https://console.firebase.google.com" target="_blank" rel="noopener" className="text-blue-400 hover:underline">Firebase Console</a></li>
+                                                    <li>Create a new project</li>
+                                                    <li>Enable Authentication → Google sign-in</li>
+                                                    <li>Enable Realtime Database (start in test mode)</li>
+                                                    <li>Get config from Project Settings → Your apps → Web app</li>
+                                                    <li>Update FIREBASE_CONFIG in this file</li>
+                                                </ol>
+                                            </div>
+                                        ) : user ? (
+                                            <div className="space-y-3">
+                                                <div className="flex items-center gap-3">
+                                                    <img
+                                                        src={user.photoURL || 'https://via.placeholder.com/40'}
+                                                        alt=""
+                                                        className="w-10 h-10 rounded-full"
+                                                    />
+                                                    <div>
+                                                        <p className="font-medium">{user.displayName}</p>
+                                                        <p className="text-sm text-slate-400">{user.email}</p>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2 text-sm">
+                                                    <span className={`w-2 h-2 rounded-full ${syncStatus === 'synced' ? 'bg-green-500' :
+                                                        syncStatus === 'syncing' ? 'bg-blue-500 sync-pulse' :
+                                                            syncStatus === 'offline' ? 'bg-yellow-500' : 'bg-slate-500'
+                                                        }`}></span>
+                                                    <span className="text-slate-400">
+                                                        {syncStatus === 'synced' ? 'All data synced' :
+                                                            syncStatus === 'syncing' ? 'Syncing...' :
+                                                                syncStatus === 'offline' ? 'Offline - changes will sync when online' :
+                                                                    'Not connected'}
+                                                    </span>
+                                                </div>
+                                                {lastSynced && (
+                                                    <p className="text-xs text-slate-500">
+                                                        Last synced: {lastSynced.toLocaleString()}
+                                                    </p>
+                                                )}
+                                                <button
+                                                    onClick={signOut}
+                                                    className="w-full bg-white/10 hover:bg-slate-600 py-2 rounded-lg text-sm"
+                                                >
+                                                    Sign out
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-3">
+                                                <p className="text-sm text-slate-400">
+                                                    Sign in to sync your data across all devices. Your data will be automatically backed up and synced in real-time.
+                                                </p>
+                                                <button
+                                                    onClick={signInWithGoogle}
+                                                    disabled={authLoading}
+                                                    className="w-full flex items-center justify-center gap-2 bg-white text-slate-900 py-3 rounded-lg font-medium hover:bg-slate-100 transition disabled:opacity-50"
+                                                >
+                                                    {authLoading ? (
+                                                        <span className="sync-spin">↻</span>
+                                                    ) : (
+                                                        <svg className="w-5 h-5" viewBox="0 0 24 24">
+                                                            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                                                            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                                                            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                                                            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                                                        </svg>
+                                                    )}
+                                                    Sign in with Google
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Currency Settings */}
+                                <div className="glass-card rounded-xl p-6">
+                                    <h3 className="font-semibold mb-4">Currency Settings</h3>
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="text-sm text-slate-400 block mb-2">Base Currency</label>
+                                            <select
+                                                value={state.settings.baseCurrency}
+                                                onChange={(e) => setState(prev => ({
+                                                    ...prev,
+                                                    settings: { ...prev.settings, baseCurrency: e.target.value }
+                                                }))}
+                                                className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2"
+                                            >
+                                                {Object.entries(CURRENCIES).map(([code, { name }]) => (
+                                                    <option key={code} value={code}>{code} - {name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Exchange Rates */}
+                                <div className="glass-card rounded-xl p-6">
+                                    <h3 className="font-semibold mb-4">Exchange Rates</h3>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="text-sm text-slate-400 block mb-2">1 USD = TZS</label>
+                                            <input
+                                                type="number"
+                                                value={state.exchangeRates.USD_TZS}
+                                                onChange={(e) => setState(prev => ({
+                                                    ...prev,
+                                                    exchangeRates: { ...prev.exchangeRates, USD_TZS: parseFloat(e.target.value) || 2700 }
+                                                }))}
+                                                className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-sm text-slate-400 block mb-2">1 USD = KES</label>
+                                            <input
+                                                type="number"
+                                                value={state.exchangeRates.USD_KES}
+                                                onChange={(e) => setState(prev => ({
+                                                    ...prev,
+                                                    exchangeRates: { ...prev.exchangeRates, USD_KES: parseFloat(e.target.value) || 129 }
+                                                }))}
+                                                className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Data Management */}
+                                <div className="glass-card rounded-xl p-6">
+                                    <h3 className="font-semibold mb-4">Data Management</h3>
+                                    <div className="space-y-4">
+                                        <button
+                                            onClick={exportData}
+                                            className="w-full bg-green-600 hover:bg-green-700 py-3 rounded-lg"
+                                        >
+                                            Export Full Backup (JSON)
+                                        </button>
+
+                                        <label className="block w-full bg-blue-600 hover:bg-blue-700 py-3 rounded-lg text-center cursor-pointer">
+                                            Restore from Backup
+                                            <input
+                                                type="file"
+                                                accept=".json"
+                                                className="hidden"
+                                                onChange={(e) => e.target.files[0] && importData(e.target.files[0])}
+                                            />
+                                        </label>
+
+                                        <button
+                                            onClick={() => {
+                                                if (confirm('This will clear ALL data. Are you sure?')) {
+                                                    localStorage.clear();
+                                                    window.location.reload();
+                                                }
+                                            }}
+                                            className="w-full bg-red-600 hover:bg-red-700 py-3 rounded-lg"
+                                        >
+                                            Clear All Data
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Modals */}
+                    {showAddModal === 'transaction' && (
+                        <Modal title="Add Transaction" onClose={() => setShowAddModal(null)}>
+                            <TransactionForm accounts={state.accounts} onSave={addTransaction} />
+                        </Modal>
+                    )}
+
+                    {showAddModal === 'goal' && (
+                        <Modal title="Add Goal" onClose={() => setShowAddModal(null)}>
+                            <GoalForm onSave={addGoal} />
+                        </Modal>
+                    )}
+
+                    {showAddModal === 'subscription' && (
+                        <Modal title="Add Subscription" onClose={() => setShowAddModal(null)}>
+                            <SubscriptionForm onSave={addSubscription} />
+                        </Modal>
+                    )}
+
+                    {showAddModal === 'account' && (
+                        <Modal title="Add Account" onClose={() => setShowAddModal(null)}>
+                            <AccountForm onSave={addAccount} />
+                        </Modal>
+                    )}
+                </div>
+            );
+        };
+
+        // Modal Component
+        const Modal = ({ title, children, onClose }) => (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="glass-card rounded-xl w-full max-w-md">
+                    <div className="flex justify-between items-center p-6 border-b border-white/10">
+                        <h2 className="text-lg font-semibold">{title}</h2>
+                        <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">&times;</button>
+                    </div>
+                    <div className="p-6">{children}</div>
+                </div>
+            </div>
+        );
+
+        // Form Components
+        const TransactionForm = ({ accounts, onSave }) => {
+            const [form, setForm] = useState({
+                date: new Date().toISOString().slice(0, 10),
+                description: '',
+                amount: '',
+                currency: 'TZS',
+                category: 'Other',
+                type: 'expense'
+            });
+
+            return (
+                <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                        <button onClick={() => setForm({ ...form, type: 'expense' })} className={`py-2 rounded-lg ${form.type === 'expense' ? 'bg-red-600' : 'bg-white/10'}`}>Expense</button>
+                        <button onClick={() => setForm({ ...form, type: 'income' })} className={`py-2 rounded-lg ${form.type === 'income' ? 'bg-green-600' : 'bg-white/10'}`}>Income</button>
+                    </div>
+                    <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                    <input type="text" placeholder="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                    <div className="grid grid-cols-2 gap-4">
+                        <input type="number" placeholder="Amount" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                        <select value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} className="bg-white/10 border border-white/20 rounded-lg px-4 py-2">
+                            {Object.keys(CURRENCIES).map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                    </div>
+                    <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2">
+                        {(form.type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    <button onClick={() => form.description && form.amount && onSave({ ...form, amount: parseFloat(form.amount) })} className="w-full bg-blue-600 hover:bg-blue-700 py-3 rounded-lg font-medium">Save</button>
+                </div>
+            );
+        };
+
+        const GoalForm = ({ onSave }) => {
+            const [form, setForm] = useState({ name: '', target: '', currency: 'KES', deadline: '' });
+            return (
+                <div className="space-y-4">
+                    <input type="text" placeholder="Goal name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                    <div className="grid grid-cols-2 gap-4">
+                        <input type="number" placeholder="Target amount" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} className="bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                        <select value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} className="bg-white/10 border border-white/20 rounded-lg px-4 py-2">
+                            {Object.keys(CURRENCIES).map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                    </div>
+                    <input type="date" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                    <button onClick={() => form.name && form.target && onSave({ ...form, target: parseFloat(form.target) })} className="w-full bg-blue-600 hover:bg-blue-700 py-3 rounded-lg font-medium">Create Goal</button>
+                </div>
+            );
+        };
+
+        const SubscriptionForm = ({ onSave }) => {
+            const [form, setForm] = useState({ name: '', amount: '', currency: 'TZS', frequency: 'monthly', nextDue: '' });
+            return (
+                <div className="space-y-4">
+                    <input type="text" placeholder="Service name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                    <div className="grid grid-cols-2 gap-4">
+                        <input type="number" placeholder="Amount" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                        <select value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} className="bg-white/10 border border-white/20 rounded-lg px-4 py-2">
+                            {Object.keys(CURRENCIES).map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                    </div>
+                    <select value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2">
+                        <option value="monthly">Monthly</option>
+                        <option value="annual">Annual</option>
+                    </select>
+                    <input type="date" value={form.nextDue} onChange={(e) => setForm({ ...form, nextDue: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                    <button onClick={() => form.name && form.amount && onSave({ ...form, amount: parseFloat(form.amount) })} className="w-full bg-blue-600 hover:bg-blue-700 py-3 rounded-lg font-medium">Add Subscription</button>
+                </div>
+            );
+        };
+
+        const AccountForm = ({ onSave }) => {
+            const [form, setForm] = useState({ name: '', type: 'Bank Account', balance: '', currency: 'TZS' });
+            return (
+                <div className="space-y-4">
+                    <input type="text" placeholder="Account name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                    <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2">
+                        {ACCOUNT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                    <div className="grid grid-cols-2 gap-4">
+                        <input type="number" placeholder="Balance" value={form.balance} onChange={(e) => setForm({ ...form, balance: e.target.value })} className="bg-white/10 border border-white/20 rounded-lg px-4 py-2" />
+                        <select value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} className="bg-white/10 border border-white/20 rounded-lg px-4 py-2">
+                            {Object.keys(CURRENCIES).map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                    </div>
+                    <button onClick={() => form.name && onSave({ ...form, balance: parseFloat(form.balance) || 0 })} className="w-full bg-blue-600 hover:bg-blue-700 py-3 rounded-lg font-medium">Add Account</button>
+                </div>
+            );
+        };
+
+        // Render
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+
+</html>
